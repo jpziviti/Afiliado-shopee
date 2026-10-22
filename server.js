@@ -19,36 +19,61 @@ function dominioPermitido(u) {
   }
 }
 
-// Abre a pagina de verdade (como um navegador), deixa o JavaScript rodar,
-// e "escuta" os arquivos de video que a propria pagina carrega.
+const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function acharVideoComNavegador(url) {
   const browser = await puppeteer.launch({
     headless: "new",
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--autoplay-policy=no-user-gesture-required",
+    ],
   });
   try {
     const page = await browser.newPage();
     await page.setUserAgent(UA);
-    await page.setViewport({ width: 390, height: 844 });
+    await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
 
     let videoUrl = null;
 
-    page.on("request", (req) => {
-      const u = req.url();
-      if (!videoUrl && /\.mp4(\?|$)/i.test(u)) {
-        videoUrl = u;
-      }
+    // Pega qualquer resposta que seja video (pelo tipo ou pela extensao)
+    page.on("response", (res) => {
+      try {
+        const u = res.url();
+        const ct = (res.headers()["content-type"] || "").toLowerCase();
+        if (!videoUrl && !u.startsWith("blob:") && (ct.startsWith("video/") || /\.mp4(\?|$)/i.test(u))) {
+          videoUrl = u;
+        }
+      } catch (e) {}
     });
 
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await esperar(3000);
 
-    await new Promise((r) => setTimeout(r, 4000));
+    // Forca o video a tocar (sem som) para a pagina pedir o arquivo
+    await page.evaluate(() => {
+      const v = document.querySelector("video");
+      if (v) {
+        v.muted = true;
+        v.play().catch(() => {});
+      }
+    }).catch(() => {});
+    await page.mouse.click(195, 420).catch(() => {});
 
+    // Espera ate 12s pelo video aparecer
+    for (let i = 0; i < 24 && !videoUrl; i++) {
+      await esperar(500);
+    }
+
+    // Plano B: ler direto da tag <video>
     if (!videoUrl) {
       videoUrl = await page.evaluate(() => {
         const v = document.querySelector("video");
-        return v && v.src ? v.src : v && v.currentSrc ? v.currentSrc : null;
-      });
+        const s = v && (v.currentSrc || v.src);
+        return s && !s.startsWith("blob:") ? s : null;
+      }).catch(() => null);
     }
 
     return videoUrl;
@@ -78,7 +103,9 @@ app.get("/api/baixar", async (req, res) => {
   const { v } = req.query;
   if (!v) return res.status(400).send("Faltou o video.");
   try {
-    const r = await fetch(v, { headers: { "User-Agent": UA } });
+    const r = await fetch(v, {
+      headers: { "User-Agent": UA, Referer: "https://sv.shopee.com.br/" },
+    });
     if (!r.ok) return res.status(502).send("Nao foi possivel baixar.");
     res.setHeader("Content-Type", "video/mp4");
     res.setHeader("Content-Disposition", 'attachment; filename="shopee-video.mp4"');
